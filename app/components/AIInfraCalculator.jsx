@@ -614,8 +614,8 @@ export default function AIInfraCalculator() {
 
   const [gpuPriceLow,      setGpuPriceLow]      = useState(GPU_SPECS["L4"].price);
   const [gpuPriceHigh,     setGpuPriceHigh]     = useState(GPU_SPECS["L4"].priceHigh);
-  const [serverPriceLow,   setServerPriceLow]   = useState(10000);
-  const [serverPriceHigh,  setServerPriceHigh]  = useState(14000);
+  const [serverPriceLow,   setServerPriceLow]   = useState(2500);
+  const [serverPriceHigh,  setServerPriceHigh]  = useState(3000);
   const [storagePriceLow,  setStoragePriceLow]  = useState(60000);
   const [storagePriceHigh, setStoragePriceHigh] = useState(80000);
   const [cpuCores,         setCpuCores]         = useState(32);
