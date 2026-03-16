@@ -16,6 +16,13 @@ const GPU_SPECS = {
   L20:   { name: "NVIDIA L20",streams: 100, vram: 48, price: 6000,  priceHigh: 13200 },
 };
 
+const CPU_SERVERS = {
+  "16": { cores: 16, name: "AMD EPYC 7232P / Intel Xeon 8280", tdp: 120, price: 2500, priceHigh: 3500 },
+  "32": { cores: 32, name: "AMD EPYC 7302P / Intel Xeon Platinum 8380", tdp: 155, price: 4500, priceHigh: 6000 },
+  "40": { cores: 40, name: "AMD EPYC 7452 / Intel Xeon Platinum 8592+", tdp: 225, price: 6500, priceHigh: 8500 },
+  "64": { cores: 64, name: "AMD EPYC 7702 / Intel Xeon Platinum 8592", tdp: 360, price: 9500, priceHigh: 12000 },
+};
+
 const RES_PRESETS = [
   { label: "220×220",   w: 220,  vramScale: 0.30, streamScale: 2.20 },
   { label: "320×320",   w: 320,  vramScale: 0.45, streamScale: 1.70 },
@@ -94,6 +101,444 @@ const BASE_RES_W      = 640; // baseline resolution for GPU IPS rating
 // demand_per_camera = Σ_models( fps[m] × (resW[m]/640)² × pipelineMult[m] )
 const GPU_IPS = { T4: 750, A5000: 1500, L4: 1800, H20: 4000, L20: 3000 };
 
+// ─── DEPLOYMENT TIMELINE LOGIC (COMPRESSED, 3-6 MONTHS) ────────────────────────
+// Assumes infrastructure is PRE-PHASE (already done)
+// Organized by 7 functional headers (model groups), all work in parallel
+// Timeline structure: Model Prep → Camera Staging → Parallel Deployment → Testing → Go-Live
+
+const DEPLOYMENT_PHASES = {
+  // PRE-PHASE (not counted in timeline): Infrastructure Setup assumed complete
+  INFRASTRUCTURE_PHASE: {
+    description: "PRE-PHASE (Assumed Complete)",
+    duration: 3,  // Only included for reference if infrastructure not yet done
+    tasks: ["Server procurement & setup", "Network provisioning", "Storage SAN deployment"]
+  },
+  // Per model deployment (weeks) - based on pipeline complexity
+  modelDeploymentBase: {
+    [PIPELINE.DETECTION]: 1.0,  // YOLO inference, no training usually
+    [PIPELINE.TRACKING]:  2.0,   // Model + tracker tuning, dataset collection
+    [PIPELINE.REID]:      3.5,   // Complex model training, large dataset, cross-cam validation
+  },
+  // Compressed phase timings (weeks) - for 320 cameras distributed across 7 headers
+  modelPrep: 1.5,              // Week 1: Model download, CUDA setup, DeepStream config (all parallel)
+  cameraStagingInfra: 1.5,     // Week 1-2: Parallel cables, PoE config, network discovery
+  parallelDeploymentPerHeader: 2.0,  // Week 2-4: Each header does (model deploy + camera integration) in parallel
+  integrationTesting: 1.5,     // Week 4-5: Cross-header validation, false positive tuning
+  systemValidation: 1.0,       // Week 5: Full system test, stress testing, handoff prep
+  goLive: 0.5,                 // Week 5-6: Phased rollout per area, monitoring ramp-up
+};
+
+// Calculate deployment timeline organized by headers (model groups)
+// All headers execute deployment phase in parallel (~2 weeks), then sequential testing
+const calculateDeploymentTimeline = (activeUcs, camerasPerUc, gpuType, totalGpusNeeded) => {
+  if (activeUcs.length === 0) {
+    return { 
+      total: 0, 
+      phases: {}, 
+      breakdown: [], 
+      useCaseBreakdown: [],
+      headerBreakdowns: [],
+      criticalPath: "No use cases selected" 
+    };
+  }
+
+  const totalCameras = Object.values(camerasPerUc).reduce((s, c) => s + c, 0);
+  
+  // GROUP USE CASES BY HEADER (Model Group)
+  const headerGroups = {};
+  MODEL_GROUPS.forEach(group => {
+    headerGroups[group.id] = {
+      id: group.id,
+      name: group.name,
+      color: group.color,
+      useCases: [],
+      cameras: 0,
+    };
+  });
+  
+  activeUcs.forEach(uc => {
+    if (headerGroups[uc.model]) {
+      headerGroups[uc.model].useCases.push(uc.n);
+      headerGroups[uc.model].cameras += camerasPerUc[uc.n] || 0;
+    }
+  });
+  
+  // Filter to only active headers
+  const activeHeaders = Object.values(headerGroups).filter(h => h.useCases.length > 0).sort((a, b) => a.name.localeCompare(b.name));
+  
+  // COMPRESSED TIMELINE (all phases in parallel where possible)
+  // Phase 1: Model Prep (Week 1) - ALL headers run in parallel
+  const modelPrepWeeks = DEPLOYMENT_PHASES.modelPrep;
+  
+  // Phase 2: Camera Staging (Week 1-2) - Runs parallel to Model Prep
+  const cameraStagingWeeks = DEPLOYMENT_PHASES.cameraStagingInfra;
+  
+  // Phase 3: PARALLEL DEPLOYMENT (Week 2-4) - Each header does their model + camera integration
+  // All headers complete this within the same ~2 week window (parallel execution)
+  const parallelDeploymentWeeks = DEPLOYMENT_PHASES.parallelDeploymentPerHeader;
+  
+  // Phase 4: Integration Testing (Week 4-5) - Sequential but quick
+  const integrationTestingWeeks = DEPLOYMENT_PHASES.integrationTesting;
+  
+  // Phase 5: System Validation (Week 5) - Final full-system test
+  const systemValidationWeeks = DEPLOYMENT_PHASES.systemValidation;
+  
+  // Phase 6: Go-Live (Week 5-6) - Phased rollout per area
+  const goLiveWeeks = DEPLOYMENT_PHASES.goLive;
+  
+  // CRITICAL PATH (min of all activities, considering parallelism)
+  // Model Prep and Camera Staging run in parallel
+  // Then Deployment, Testing, Validation, Go-Live are sequential
+  const criticalPathWeeks = 
+    Math.max(modelPrepWeeks, cameraStagingWeeks) +  // These run in parallel
+    parallelDeploymentWeeks +
+    integrationTestingWeeks +
+    systemValidationWeeks +
+    goLiveWeeks;
+  
+  // Calculate per-header timeline
+  const headerBreakdowns = activeHeaders.map(header => {
+    const headerCameras = header.cameras;
+    return {
+      id: header.id,
+      name: header.name,
+      color: header.color,
+      cameras: headerCameras,
+      usecaseCount: header.useCases.length,
+      usecaseIds: header.useCases,
+      // Per-header timing (rough estimate, but they all fit within the parallel deployment window)
+      modelPrepWeeks: DEPLOYMENT_PHASES.modelPrep,
+      deploymentWeeks: DEPLOYMENT_PHASES.parallelDeploymentPerHeader,
+      testingWeeks: integrationTestingWeeks / activeHeaders.length,  // Share testing load
+    };
+  });
+  
+  // Timeline breakdown by phase (for visualization)
+  const phases = {
+    modelPrep: modelPrepWeeks,
+    cameraStaging: cameraStagingWeeks,
+    parallelDeployment: parallelDeploymentWeeks,
+    integrationTesting: integrationTestingWeeks,
+    systemValidation: systemValidationWeeks,
+    goLive: goLiveWeeks,
+  };
+  
+  const breakdown = [
+    { 
+      name: "Model Prep & Environment Setup", 
+      weeks: modelPrepWeeks, 
+      color: "#f59e0b", 
+      detail: `${activeHeaders.length} headers: CUDA, DeepStream config`,
+      parallel: true
+    },
+    { 
+      name: "Camera Infrastructure Staging", 
+      weeks: cameraStagingWeeks, 
+      color: "#3b82f6", 
+      detail: `${totalCameras} cameras: Cable runs, PoE, network discovery (parallel with Model Prep)`,
+      parallel: true
+    },
+    { 
+      name: "Parallel Deployment (Models + Cameras per Header)", 
+      weeks: parallelDeploymentWeeks, 
+      color: "#00d4aa", 
+      detail: `All ${activeHeaders.length} headers deployed in parallel (~${parallelDeploymentWeeks.toFixed(1)} weeks each)`,
+      parallel: false
+    },
+    { 
+      name: "Integration Testing & Cross-Header Validation", 
+      weeks: integrationTestingWeeks, 
+      color: "#8b5cf6", 
+      detail: "False positive tuning, multi-header coordination tests",
+      parallel: false
+    },
+    { 
+      name: "System Validation & Stress Testing", 
+      weeks: systemValidationWeeks, 
+      color: "#06b6d4", 
+      detail: "Full system under load, edge case walkthroughs",
+      parallel: false
+    },
+    { 
+      name: "Go-Live & Phased Rollout", 
+      weeks: goLiveWeeks, 
+      color: "#ec4899", 
+      detail: "Production ramp-up, 24/7 monitoring activation",
+      parallel: false
+    },
+  ];
+  
+  // Per-use-case breakdown (for reference)
+  // IMPORTANT: Camera integration is SHARED (320 cameras total, not per-UC)
+  // Each UC only includes model deployment time, not camera work
+  const useCaseBreakdown = activeUcs.map(uc => {
+    const header = headerGroups[uc.model];
+    const ucCameras = camerasPerUc[uc.n] || 0;
+    const pipelineLabel = PIPELINE_LABELS[uc.pipeline || PIPELINE.DETECTION].label;
+    
+    // Per-UC timing: ONLY model deployment (not camera integration - that's shared)
+    const modelDeploymentWeeks = DEPLOYMENT_PHASES.modelDeploymentBase?.[uc.pipeline || PIPELINE.DETECTION] || 1.0;
+    // UC-specific testing (small portion of the shared testing window)
+    const ucTestingWeeks = 0.3;
+    
+    // UC timeline: happens within the parallel deployment window (weeks 2-4)
+    // Does NOT include camera integration since that's already done in Week 1-2 pre-phase
+    const estimatedWeeks = modelDeploymentWeeks + ucTestingWeeks;
+    
+    return {
+      n: uc.n,
+      label: uc.label,
+      cameras: ucCameras,
+      header: header?.name || "Unknown",
+      headerColor: header?.color || "#64748b",
+      modelComplexity: pipelineLabel,
+      estimatedWeeks: estimatedWeeks,
+      estimatedDays: Math.round(estimatedWeeks * 7),
+      // UC is part of parallel deployment window
+      startWeek: Math.max(modelPrepWeeks, cameraStagingWeeks),
+      endWeek: Math.max(modelPrepWeeks, cameraStagingWeeks) + parallelDeploymentWeeks,
+    };
+  });
+
+  return {
+    total: criticalPathWeeks,
+    totalDays: Math.round(criticalPathWeeks * 7),
+    totalMonths: (criticalPathWeeks / 4.33).toFixed(1),
+    phases,
+    breakdown,
+    headerBreakdowns,
+    useCaseBreakdown,
+    activeHeaderCount: activeHeaders.length,
+    totalCameras,
+    criticalPath: `Model Prep → Camera Staging (parallel) → Deployment (${activeHeaders.length} headers parallel) → Testing → Go-Live`,
+  };
+};
+
+// ─── SERVER DIMENSIONING LOGIC ────────────────────────────────────────────────
+// Calculates optimal GPUs per server based on real hardware constraints:
+// - Thermal envelope (cooling headroom, fan design)
+// - Power delivery (PSU, voltage regulators)
+// - PCIe bandwidth (x16 + x16 + x8 topology on typical boards)
+// - Memory-to-GPU ratio (avoiding NUMA bottlenecks)
+// - Cooling challenges (hot GPU stacks require better airflow)
+
+const calculateServerConfig = (gpuType, totalGpusNeeded) => {
+  // For now, use a simple mapping based on GPU power characteristics
+  const spec = GPU_SPECS[gpuType];
+  
+  // Estimate TDP and recommended GPUs based on GPU model
+  // These would normally come from GPU_SPECS with tdp, recommendedPerServer etc
+  const tdpEstimates = {
+    T4: { tdp: 70, recommended: 4, max: 8 },
+    A5000: { tdp: 250, recommended: 2, max: 4 },
+    L4: { tdp: 72, recommended: 3, max: 6 },
+    H20: { tdp: 400, recommended: 2, max: 2 },
+    L20: { tdp: 350, recommended: 2, max: 3 },
+  };
+  
+  const estimate = tdpEstimates[gpuType] || { tdp: 100, recommended: 2, max: 4 };
+  
+  // Thermal constraint: TDP scaling
+  const maxByPower = Math.floor(2000 / estimate.tdp);
+  const maxByThermal = Math.floor(1000 / Math.max(100, Math.ceil(estimate.tdp * 0.8)));
+  
+  // PCIe constraint: typical board topology
+  const maxByPcie = estimate.tdp > 300 ? 2 : (estimate.tdp > 150 ? 3 : 4);
+  
+  // Apply constraints
+  const constrained = Math.min(
+    estimate.recommended,
+    maxByPower,
+    maxByThermal,
+    maxByPcie,
+    estimate.max
+  );
+  
+  return {
+    recommended: Math.max(1, constrained),
+    max: estimate.max,
+    maxByPower,
+    maxByThermal,
+    maxByPcie,
+    constraintLimiting: constrained < estimate.recommended ? 
+      (constrained === maxByPower ? 'power' : 
+       constrained === maxByThermal ? 'thermal' : 
+       constrained === maxByPcie ? 'pcie' : 'other') : 'none',
+    reasoning: [
+      `Base OEM recommendation: ${estimate.recommended} GPUs/server`,
+      `Thermal constraint (${estimate.tdp}W TDP): max ${maxByThermal} GPUs`,
+      `Power budget (2000W): max ${maxByPower} GPUs`,
+      `PCIe bandwidth: max ${maxByPcie} GPUs (full x16 per GPU)`,
+      `→ Recommended: ${Math.max(1, constrained)} GPUs/server for optimal performance`,
+    ],
+  };
+};
+
+// ─── CPU CORE REQUIREMENT LOGIC ────────────────────────────────────────────────
+// Calculates CPU cores needed based on:
+// - Video decoding: ~600 Mbps per core (H.264/H.265 codec capacity)
+// - NMS/Aggregation: ~2-3 cores
+// - Preprocessing: CPU-based (0.4ms/frame) vs GPU-accelerated (0.1ms/frame)
+// - System overhead: ~2-3 cores (OS, services, frame I/O)
+
+const calculateCpuRequirements = (cameras, bitratePerCam, totalFpsLoad, gpuAccelEnabled = true) => {
+  // If no cameras selected, CPU requirements are 0
+  if (cameras === 0 || totalFpsLoad === 0) {
+    return {
+      cameras: 0,
+      bitratePerCam,
+      totalBitrateMbps: 0,
+      totalFpsLoad: 0,
+      breakdown: {
+        decoding: 0,
+        nms: 0,
+        preprocessCpuBased: 0,
+        preprocessGpuAccel: 0,
+        systemOverhead: 0,
+      },
+      cpuBased: {
+        minimum: 0,
+        recommended: 0,
+        label: "CPU-Based Preprocessing",
+        description: "All preprocessing (resize, color, norm.) done on CPU",
+        utilization: "0",
+      },
+      gpuAccelerated: {
+        minimum: 0,
+        recommended: 0,
+        label: "GPU-Accelerated Preprocessing",
+        description: "Preprocessing batched & GPU-accelerated via CUDA",
+        utilization: "0",
+      },
+      recommendation: gpuAccelEnabled ? "gpu" : "cpu",
+    };
+  }
+
+  // Video codec decoding: ~600 Mbps per core (H.264/H.265 typical)
+  const decodingBandwidthPerCore = 600;
+  const totalBitrateMbps = cameras * bitratePerCam;
+  const coresForDecoding = Math.ceil(totalBitrateMbps / decodingBandwidthPerCore);
+
+  // NMS and aggregation per-frame processing
+  const coresForNms = 2;
+
+  // Preprocessing load calculation:
+  // CPU-based: 0.4ms per frame → (fps / 1000) * 0.4 cores
+  // GPU-accel: 0.1ms per frame + minimal GPU coordination → ~0.00008 cores per fps
+  const coresForPreprocessCpuBased = Math.ceil(totalFpsLoad * 0.0004);
+  const coresForPreprocessGpuAccel = Math.ceil(totalFpsLoad * 0.00008);
+
+  // System overhead (OS, services, frame I/O buffer)
+  const coresForSystemOverhead = 3;
+
+  // Calculate totals
+  const cpuBasedTotal = coresForDecoding + coresForNms + coresForPreprocessCpuBased + coresForSystemOverhead;
+  const gpuAccelTotal = coresForDecoding + coresForNms + coresForPreprocessGpuAccel + coresForSystemOverhead;
+
+  // Recommended: 1.5x safety margin for headroom and peak loads
+  const cpuBasedRecommended = Math.ceil(cpuBasedTotal * 1.5);
+  const gpuAccelRecommended = Math.ceil(gpuAccelTotal * 1.5);
+
+  return {
+    cameras,
+    bitratePerCam,
+    totalBitrateMbps,
+    totalFpsLoad,
+    breakdown: {
+      decoding: coresForDecoding,
+      nms: coresForNms,
+      preprocessCpuBased: coresForPreprocessCpuBased,
+      preprocessGpuAccel: coresForPreprocessGpuAccel,
+      systemOverhead: coresForSystemOverhead,
+    },
+    cpuBased: {
+      minimum: cpuBasedTotal,
+      recommended: cpuBasedRecommended,
+      label: "CPU-Based Preprocessing",
+      description: "All preprocessing (resize, color, norm.) done on CPU",
+      utilization: ((cpuBasedTotal / cpuBasedRecommended) * 100).toFixed(0),
+    },
+    gpuAccelerated: {
+      minimum: gpuAccelTotal,
+      recommended: gpuAccelRecommended,
+      label: "GPU-Accelerated Preprocessing",
+      description: "Preprocessing batched & GPU-accelerated via CUDA",
+      utilization: ((gpuAccelTotal / gpuAccelRecommended) * 100).toFixed(0),
+    },
+    recommendation: gpuAccelEnabled ? "gpu" : "cpu",
+  };
+};
+
+// ─── UNIFIED SERVER RECOMMENDATION LOGIC ────────────────────────────────────────────────────────────────
+// Single server type handles both CPU (decode/preprocess) + GPU (inference) tasks
+// Calculates servers needed as the maximum of CPU or GPU requirements
+
+// totalCoresRequired = auto-calculated cores needed (from calculateCpuRequirements)
+// coresPerServer     = user slider: how many cores each physical server has
+// gpusPerServer      = user slider: how many GPUs each physical server has
+const getUnifiedServerRecommendations = (totalCoresRequired, coresPerServer, gpusNeeded, gpusPerServer) => {
+  if (totalCoresRequired === 0 && gpusNeeded === 0) {
+    return {
+      totalServersNeeded: 0,
+      totalCoresRequired: 0,
+      coresPerServer,
+      cpuServersNeeded: 0,
+      gpuServersNeeded: 0,
+      gpusNeeded: 0,
+      gpusPerServer,
+      totalGpuSlots: 0,
+      totalCoreCoverage: 0,
+      cpuHeadroom: 0,
+      cpuUtilization: "0.0",
+      gpuUtilization: "0.0",
+      bottleneck: "N/A",
+    };
+  }
+
+  // CPU servers = ceil(total cores needed / cores each server provides)
+  // → more cores per server = fewer CPU servers needed
+  // → fewer cores per server = more CPU servers needed (may exceed GPU servers → raises count)
+  const cpuServersNeeded = totalCoresRequired > 0 && coresPerServer > 0
+    ? Math.ceil(totalCoresRequired / coresPerServer)
+    : 0;
+
+  // GPU servers = ceil(total GPUs / GPUs per server)
+  const gpuServersNeeded = gpusNeeded > 0 ? Math.ceil(gpusNeeded / gpusPerServer) : 0;
+
+  // Bottleneck wins — whichever needs more servers drives the total
+  const totalServersNeeded = Math.max(cpuServersNeeded, gpuServersNeeded);
+
+  const totalGpuSlots   = gpusPerServer * totalServersNeeded;
+  const totalCoreCoverage = coresPerServer * totalServersNeeded;
+
+  const cpuUtilValue = totalCoreCoverage > 0
+    ? (totalCoresRequired / totalCoreCoverage) * 100
+    : 0;
+  const gpuUtilValue = totalGpuSlots > 0
+    ? (gpusNeeded / totalGpuSlots) * 100
+    : 0;
+
+  const bottleneck = cpuServersNeeded > gpuServersNeeded ? "CPU"
+    : gpuServersNeeded > cpuServersNeeded ? "GPU"
+    : "Balanced";
+
+  return {
+    totalServersNeeded,
+    totalCoresRequired,
+    coresPerServer,
+    cpuServersNeeded,
+    gpuServersNeeded,
+    gpusNeeded,
+    gpusPerServer,
+    totalGpuSlots,
+    totalCoreCoverage,
+    cpuHeadroom: totalCoreCoverage - totalCoresRequired,
+    cpuUtilization: cpuUtilValue.toFixed(1),
+    gpuUtilization: gpuUtilValue.toFixed(1),
+    bottleneck,
+  };
+};
+
 // ─── FORMATTERS ───────────────────────────────────────────────────────────────
 const fmtLacs = n => {
   const lacs = n / 100_000;
@@ -163,7 +608,6 @@ export default function AIInfraCalculator() {
   const [redundancyFactor, setRedundancyFactor] = useState(1.20);
   const [storageEnabled,   setStorageEnabled]   = useState(false);
   const [isCloud,          setIsCloud]          = useState(false);
-  const [gpusPerServer,    setGpusPerServer]    = useState(8);
   const [activeTab,        setActiveTab]        = useState("summary");
   const [showFormulas,     setShowFormulas]      = useState(true);
   const [showUcCameras,    setShowUcCameras]    = useState(false);
@@ -174,6 +618,7 @@ export default function AIInfraCalculator() {
   const [serverPriceHigh,  setServerPriceHigh]  = useState(14000);
   const [storagePriceLow,  setStoragePriceLow]  = useState(60000);
   const [storagePriceHigh, setStoragePriceHigh] = useState(80000);
+  const [cpuCores,         setCpuCores]         = useState(32);
   const [cloudPriceLow,    setCloudPriceLow]    = useState(0.30);
   const [cloudPriceHigh,   setCloudPriceHigh]   = useState(0.80);
 
@@ -198,6 +643,10 @@ export default function AIInfraCalculator() {
   };
 
   const gpu = GPU_SPECS[gpuType];
+
+  // ─── CALCULATE GPU CAPACITY PER SERVER (thermal/power constrained) ─────────
+  const serverConfig = calculateServerConfig(gpuType, 1); // Get constraints for this GPU type
+  const gpusPerServer = serverConfig.recommended; // Dynamically derived from thermal limits
 
   // ─── CORE CALCULATIONS ────────────────────────────────────────────────────
   const calc = useMemo(() => {
@@ -275,6 +724,10 @@ export default function AIInfraCalculator() {
       ? Math.max(...activeModels.map(m => modelCameras[m.id]))
       : 0;
 
+    // Total active cameras = bottleneck (not sum), since all models share same camera streams
+    // Network, storage, and CPU decoding are based on actual camera streams (not per-model)
+    const totalActiveCameras = effectiveTotalCams;
+
     const gpusNeeded         = effectiveTotalCams > 0 ? Math.ceil(effectiveTotalCams / camerasPerGpu) : 0;
     const gpusWithRedundancy = gpusNeeded;
 
@@ -295,7 +748,7 @@ export default function AIInfraCalculator() {
     const memRemaining   = gpu.vram - totalMemNeeded;
 
     // Network
-    const totalBandwidthMbps = cameras * bitratePerCam;
+    const totalBandwidthMbps = totalActiveCameras * bitratePerCam;
     const totalBandwidthGbps = totalBandwidthMbps / 1000;
     const bufferedGbps       = totalBandwidthGbps * NETWORK_BUFFER;
 
@@ -311,26 +764,20 @@ export default function AIInfraCalculator() {
     // Storage
     const mbPerSecPerCamera = bitratePerCam * BYTES_PER_BIT;
     const gbPerDayPerCamera = (mbPerSecPerCamera * SECONDS_PER_DAY) / 1024;
-    const tbPerDay          = (gbPerDayPerCamera * cameras) / 1024;
+    const tbPerDay          = (gbPerDayPerCamera * totalActiveCameras) / 1024;
     let tbForRetention, pbWithRedundancy;
-    if (storageEnabled) {
+    if (storageEnabled && totalActiveCameras > 0) {
       tbForRetention   = tbPerDay * retentionDays;
       pbWithRedundancy = (tbForRetention * redundancyFactor) / 1024;
     } else {
-      tbForRetention   = 1;
-      pbWithRedundancy = 1 / 1024;
+      tbForRetention   = 0;
+      pbWithRedundancy = 0;
     }
-
-    const serversNeeded = gpusWithRedundancy > 0 ? Math.ceil(gpusWithRedundancy / gpusPerServer) : 0;
 
     const gpuCostLow      = gpusWithRedundancy * gpuPriceLow;
     const gpuCostHigh     = gpusWithRedundancy * gpuPriceHigh;
-    const serverCostLow   = serversNeeded * serverPriceLow;
-    const serverCostHigh  = serversNeeded * serverPriceHigh;
     const storageCostLow  = pbWithRedundancy * storagePriceLow;
     const storageCostHigh = pbWithRedundancy * storagePriceHigh;
-    const totalCapexLow   = gpuCostLow  + serverCostLow  + storageCostLow;
-    const totalCapexHigh  = gpuCostHigh + serverCostHigh + storageCostHigh;
 
     const cloudMonthlyHours = 24 * 30;
     const cloudMonthlyLow   = gpusWithRedundancy * cloudPriceLow  * cloudMonthlyHours;
@@ -346,6 +793,34 @@ export default function AIInfraCalculator() {
                ipsDemand: modelIpsDemand[m.id] };
     });
 
+    // ── DEPLOYMENT TIMELINE CALCULATION ─────────────────────────────────────
+    const deploymentTimeline = calculateDeploymentTimeline(activeUcs, ucCameras, gpuType, gpusWithRedundancy);
+
+    // ── CPU CORE REQUIREMENT CALCULATION ───────────────────────────────────────
+    // Calculate both CPU-based and GPU-accelerated preprocessing scenarios
+    // totalActiveCameras already calculated based on active use cases
+    const cpuRequirements = calculateCpuRequirements(totalActiveCameras, bitratePerCam, totalFpsLoad, true);
+
+    // ── UNIFIED SERVER RECOMMENDATION & COST ───────────────────────────────────────
+    // cpuRequirements.gpuAccelerated.recommended = total cores the workload needs
+    // cpuCores = user slider: cores each physical server provides
+    // Server count = MAX(ceil(totalCores / coresPerServer), ceil(gpus / gpusPerServer))
+    const unifiedServerRec = getUnifiedServerRecommendations(
+      cpuRequirements.gpuAccelerated.recommended,  // total cores required by workload
+      cpuCores,                                     // cores per server (slider)
+      gpusWithRedundancy,
+      gpusPerServer
+    );
+    
+    // Unified server cost replaces both old serverCost and cpuServerCost
+    const unifiedServerCostLow  = unifiedServerRec.totalServersNeeded * serverPriceLow;
+    const unifiedServerCostHigh = unifiedServerRec.totalServersNeeded * serverPriceHigh;
+
+    // ── TOTAL COST INTEGRATION ─────────────────────────────────────────────────
+    // Now: GPU Hardware + Unified Servers (CPU+GPU) + Storage
+    const totalCapexLow_v2   = gpuCostLow  + unifiedServerCostLow  + storageCostLow;
+    const totalCapexHigh_v2  = gpuCostHigh + unifiedServerCostHigh + storageCostHigh;
+
     return {
       activeModels, activeUcs,
       modelCameras, modelEffectiveMem, modelResLabel, modelResW,
@@ -357,17 +832,19 @@ export default function AIInfraCalculator() {
       totalBandwidthMbps, totalBandwidthGbps, bufferedGbps,
       fpsBreakdown, totalFpsLoad,
       mbPerSecPerCamera, gbPerDayPerCamera, tbPerDay, tbForRetention, pbWithRedundancy,
-      serversNeeded,
-      gpuCostLow, gpuCostHigh, serverCostLow, serverCostHigh,
-      storageCostLow, storageCostHigh, totalCapexLow, totalCapexHigh,
+      gpuCostLow, gpuCostHigh, unifiedServerCostLow, unifiedServerCostHigh,
+      storageCostLow, storageCostHigh, totalCapexLow: totalCapexLow_v2, totalCapexHigh: totalCapexHigh_v2,
       cloudMonthlyHours, cloudMonthlyLow, cloudMonthlyHigh, cloudAnnualLow, cloudAnnualHigh,
       vehicleHasTracking, vehicleMultiplier, dominantType,
+      deploymentTimeline,
+      cpuRequirements,
+      unifiedServerRec,
     };
   }, [cameras, bitratePerCam, gpuType, retentionDays, redundancyFactor, storageEnabled,
       gpuPriceLow, gpuPriceHigh, serverPriceLow, serverPriceHigh,
-      storagePriceLow, storagePriceHigh, gpusPerServer,
+      storagePriceLow, storagePriceHigh, cpuCores,
       cloudPriceLow, cloudPriceHigh, modelFps, modelResIdx, ucCameras, enabledUcs,
-      ucPipelineOverride, gpu]);
+      ucPipelineOverride, gpu, gpusPerServer]);
 
   // ─── CHART DATA ───────────────────────────────────────────────────────────
   const fpsChartData = calc.fpsBreakdown.map(m => ({
@@ -380,14 +857,14 @@ export default function AIInfraCalculator() {
       }))
     : [];
   const costPieLow = [
-    {name:"GPU Hardware", value:calc.gpuCostLow,    color:"#00d4aa"},
-    {name:"Servers",      value:calc.serverCostLow, color:"#3b82f6"},
-    {name:"Storage",      value:calc.storageCostLow,color:"#f59e0b"},
+    {name:"GPU Hardware",    value:calc.gpuCostLow,             color:"#00d4aa"},
+    {name:"Unified Servers", value:calc.unifiedServerCostLow,   color:"#3b82f6"},
+    {name:"Storage",         value:calc.storageCostLow,         color:"#f59e0b"},
   ];
   const camGpuData = [
     {label:"Eff. Cameras", value:calc.effectiveTotalCams, fill:"#3b82f6"},
     {label:"GPUs",         value:calc.gpusWithRedundancy,  fill:"#00d4aa"},
-    {label:"Servers",      value:calc.serversNeeded,       fill:"#8b5cf6"},
+    {label:"Servers",      value:calc.unifiedServerRec.totalServersNeeded, fill:"#8b5cf6"},
   ];
   const vramBreakdown = [
     ...calc.activeModels.map(m => ({
@@ -463,6 +940,8 @@ export default function AIInfraCalculator() {
       .slider{width:100%;height:3px;-webkit-appearance:none;appearance:none;background:var(--border2);border-radius:2px;outline:none;cursor:pointer;}
       .slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg);box-shadow:0 0 6px #00d4aa66;}
       .slider-minmax{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-top:2px;}
+
+      .computed-field{margin-bottom:11px;padding:10px;background:var(--panel2);border:1px solid var(--border2);border-radius:7px;border-left:3px solid var(--accent2);}
 
       .num-input{flex:1;background:var(--panel2);border:1px solid var(--border2);color:var(--text);
         padding:5px 7px;border-radius:5px;font-family:var(--mono);font-size:11px;outline:none;transition:border .2s;}
@@ -800,7 +1279,21 @@ export default function AIInfraCalculator() {
               <SliderInput label="Redundancy Factor" value={redundancyFactor} min={1.0} max={2.0} step={0.05}
                 onChange={setRedundancyFactor} format={v=>v.toFixed(2)} unit="×" />
             </>)}
-            <SliderInput label="GPUs per Server" value={gpusPerServer} min={1} max={16} onChange={setGpusPerServer} />
+            <div className="computed-field">
+              <div style={{fontSize:10,color:"#94a3b8",marginBottom:6}}>GPUs per Server</div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{fontFamily:"var(--mono)",fontSize:18,fontWeight:700,color:"var(--accent)"}}>{gpusPerServer}</div>
+                <div style={{fontSize:9,color:"#64748b",lineHeight:1.3}}>
+                  <div>Thermal constraint: {serverConfig.constraintLimiting === 'thermal' ? '🔴' : '🟢'} {serverConfig.maxByThermal} max</div>
+                  <div>Power budget: {serverConfig.constraintLimiting === 'power' ? '🔴' : '🟢'} {serverConfig.maxByPower} max</div>
+                </div>
+              </div>
+            </div>
+            <SliderInput label="CPU Cores per Server" value={cpuCores} min={16} max={64} step={8} onChange={setCpuCores} 
+              format={v=>`${v}-core`} />
+            <div style={{fontSize:9,color:"#64748b",padding:"6px 8px",background:"#1e2d3d33",borderRadius:4,border:"1px solid #253347",marginTop:6}}>
+              💡 Recommended: {calc.cpuRequirements.gpuAccelerated.recommended} cores for {cameras} cameras. Your selection: <strong>{cpuCores} cores</strong> {cpuCores < calc.cpuRequirements.gpuAccelerated.recommended ? '⚠️ Below recommendation' : cpuCores > calc.cpuRequirements.gpuAccelerated.recommended ? '✅ Above recommendation' : '✅ Matches recommendation'}
+            </div>
           </div>
 
           {/* Pricing */}
@@ -830,6 +1323,17 @@ export default function AIInfraCalculator() {
                 <input type="number" value={storagePriceHigh} min={0} step={5000} className="num-input" placeholder="High" onChange={e=>setStoragePriceHigh(Number(e.target.value))} />
               </div>
             </div>
+            <div className="price-block">
+              <div className="price-block-label">Unified Server Cost (USD)</div>
+              <div style={{fontSize:9,color:"var(--muted)",marginBottom:8}}>
+                {calc.unifiedServerRec.totalServersNeeded} × {calc.unifiedServerRec.coresPerServer}-core server (CPU + GPU slots)
+              </div>
+              <div className="price-range-row">
+                <input type="number" value={serverPriceLow}  min={0} step={500} className="num-input" placeholder="Low"  onChange={e=>setServerPriceLow(Number(e.target.value))} />
+                <span className="price-range-sep">–</span>
+                <input type="number" value={serverPriceHigh} min={0} step={500} className="num-input" placeholder="High" onChange={e=>setServerPriceHigh(Number(e.target.value))} />
+              </div>
+            </div>
             {isCloud && (
               <div className="price-block">
                 <div className="price-block-label">Cloud GPU $/hour</div>
@@ -848,8 +1352,8 @@ export default function AIInfraCalculator() {
           <div className="tabs">
             {[{id:"summary",label:"📊 Summary"},{id:"network",label:"🌐 Network"},
               {id:"compute",label:"⚡ Compute"},{id:"storage",label:"💾 Storage"},
-              {id:"cost",label:"💰 Cost"},{id:"models",label:"🎯 Models"},
-              {id:"pipeline",label:"🔄 Pipeline"}]
+              {id:"cost",label:"💰 Cost"},{id:"timeline",label:"📅 Timeline"},
+              {id:"models",label:"🎯 Models"},{id:"pipeline",label:"🔄 Pipeline"}]
             .map(t=>(
               <button key={t.id} className={`tab${activeTab===t.id?" active":""}`} onClick={()=>setActiveTab(t.id)}>
                 {t.label}
@@ -864,8 +1368,10 @@ export default function AIInfraCalculator() {
               <div className="metric-grid">
                 <MetricCard label="Total GPUs" value={calc.gpusWithRedundancy} unit="units"
                   sub={`${calc.effectiveTotalCams} cams ÷ ${calc.camerasPerGpu} cams/GPU`} accent />
-                <MetricCard label="GPU Servers" value={calc.serversNeeded} unit="servers"
-                  sub={`${gpusPerServer} GPUs/server`} accent />
+                <MetricCard label="Unified Servers" value={calc.unifiedServerRec.totalServersNeeded} unit="servers" accent
+                  sub={`${calc.unifiedServerRec.gpusPerServer} GPUs · ${calc.unifiedServerRec.coresPerServer} cores/server · CPU ${calc.unifiedServerRec.cpuUtilization}% · ${calc.unifiedServerRec.bottleneck} bottleneck`} />
+                <MetricCard label="CPU Cores (GPU-Accel)" value={calc.cpuRequirements.gpuAccelerated.recommended} unit="cores"
+                  sub={`Min: ${calc.cpuRequirements.gpuAccelerated.minimum}, ~${calc.cpuRequirements.gpuAccelerated.utilization}% load`} accent />
                 <MetricCard label="Network BW" value={calc.bufferedGbps.toFixed(2)} unit="Gbps"
                   sub={`${calc.totalBandwidthGbps.toFixed(2)} raw + 20% buffer`} />
                 <MetricCard label="Storage" value={storageEnabled ? calc.pbWithRedundancy.toFixed(2) : "1.00"} unit="TB"
@@ -875,10 +1381,8 @@ export default function AIInfraCalculator() {
                   accent={calc.memFitsInGpu} warn={!calc.memFitsInGpu} />
                 <MetricCard label="Total FPS Load" value={calc.totalFpsLoad.toLocaleString()} unit="fps"
                   sub="per-UC cameras × per-model fps" />
-                <MetricCard label="Cameras / GPU" value={calc.camerasPerGpu} unit="cams"
-                  sub={`streams ÷ Σ(model reductions)`} />
                 <RangeCard label="Total CAPEX" low={fmtLacs(calc.totalCapexLow)} high={fmtLacs(calc.totalCapexHigh)}
-                  sub="GPU + Servers + Storage" />
+                  sub="GPU Hardware + Unified Servers + Storage" />
               </div>
 
               {calc.vehicleHasTracking && (
@@ -895,15 +1399,23 @@ export default function AIInfraCalculator() {
                   <span>VRAM Warning: {calc.activeModels.length} active models require {calc.totalMemNeeded.toFixed(1)} GB but {gpu.name} has {gpu.vram} GB.
                     Lower resolution or upgrade to NVIDIA H20 (96 GB).</span>
                 </div>
-              ) : calc.activeModels.length === 0 ? (
+              ) : cpuCores < calc.cpuRequirements.gpuAccelerated.recommended ? (
                 <div className="alert alert-warn">
                   <span className="alert-icon">⚠️</span>
-                  <span>No use cases selected. Enable at least one use case in the left panel.</span>
+                  <span>CPU Core Warning: Selected <strong>{cpuCores} cores</strong> is below recommended <strong>{calc.cpuRequirements.gpuAccelerated.recommended} cores</strong> for {cameras} cameras with GPU-accelerated preprocessing.
+                    You may experience bottlenecks at peak loads. Headroom: <strong>{cpuCores - calc.cpuRequirements.gpuAccelerated.minimum} cores</strong>.</span>
+                </div>
+              ) : cpuCores > calc.cpuRequirements.gpuAccelerated.recommended ? (
+                <div className="alert alert-ok">
+                  <span className="alert-icon">✅</span>
+                  <span>CPU Configuration Excellent: <strong>{cpuCores} cores</strong> selected vs recommended <strong>{calc.cpuRequirements.gpuAccelerated.recommended}</strong>. 
+                    Headroom: <strong>{cpuCores - calc.cpuRequirements.gpuAccelerated.minimum} cores</strong> for peak loads and system services.</span>
                 </div>
               ) : (
                 <div className="alert alert-ok">
                   <span className="alert-icon">✅</span>
-                  <span>{calc.activeModels.length} model group{calc.activeModels.length!==1?"s":""} · {calc.activeUcs.length} use case{calc.activeUcs.length!==1?"s":""} · {calc.totalMemNeeded.toFixed(1)} GB VRAM fits in {gpu.name}'s {gpu.vram} GB with {calc.memRemaining.toFixed(1)} GB headroom.</span>
+                  <span>CPU Configuration Perfect: <strong>{cpuCores} cores</strong> = recommended. 
+                    Headroom: <strong>{cpuCores - calc.cpuRequirements.gpuAccelerated.minimum} cores</strong> for peak loads and system services.</span>
                 </div>
               )}
 
@@ -1003,7 +1515,7 @@ export default function AIInfraCalculator() {
                   sub="max cameras across active models" />
                 <MetricCard label="GPUs Required" value={calc.gpusWithRedundancy} unit="GPUs"
                   sub={`ceil(${calc.effectiveTotalCams} / ${calc.camerasPerGpu})`} accent />
-                <MetricCard label="Servers" value={calc.serversNeeded} unit="servers" sub={`${gpusPerServer} GPUs each`} />
+                <MetricCard label="Servers" value={calc.unifiedServerRec.totalServersNeeded} unit="servers" sub={`${calc.unifiedServerRec.gpusPerServer} GPUs · ${calc.unifiedServerRec.bottleneck} bottleneck`} />
                 <MetricCard label="Vehicle Penalty" value={calc.vehicleHasTracking ? `×${calc.vehicleMultiplier}` : "None"} unit=""
                   sub={calc.vehicleHasTracking ? PIPELINE_LABELS[calc.dominantType].label : "detection only"} warn={calc.vehicleHasTracking} />
               </div>
@@ -1061,17 +1573,264 @@ export default function AIInfraCalculator() {
                 </div>
               </div>
               <div className="divider" />
-              <div className="chart-card">
-                <div className="chart-title">VRAM per Model (resolution-scaled)</div>
-                <ResponsiveContainer width="100%" height={230}>
-                  <BarChart data={vramBreakdown} layout="vertical" margin={{top:5,right:30,left:100,bottom:5}}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1e2d3d" horizontal={false} />
-                    <XAxis type="number" tick={{fontSize:9,fill:"#64748b"}} unit=" GB" />
-                    <YAxis dataKey="name" type="category" tick={{fontSize:9,fill:"#94a3b8"}} width={98} />
-                    <Tooltip content={({active,payload})=>active&&payload?.length?(<div className="custom-tooltip"><div className="ct-label">{payload[0].payload.name}</div><div className="ct-value">{payload[0].value} GB</div></div>):null} />
-                    <Bar dataKey="gb" radius={[0,4,4,0]}>{vramBreakdown.map((d,i)=><Cell key={i} fill={d.fill}/>)}</Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                <span style={{marginRight:6}}>⚙️ CPU Core Requirements</span>
+              </div>
+
+              {/* CPU REQUIREMENTS COMPARISON */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20}}>
+                {/* CPU-BASED PREPROCESSING */}
+                <div style={{background:"linear-gradient(135deg, #ef444415, #ef444405)",border:"2px solid #ef444444",borderRadius:10,padding:"16px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12}}>
+                    <span style={{fontSize:20}}>🔴</span>
+                    <div>
+                      <div style={{fontSize:9,color:"#ef4444",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>CPU-Based</div>
+                      <div style={{fontSize:8,color:"#64748b"}}>Preprocessing on CPU</div>
+                    </div>
+                  </div>
+
+                  <div style={{background:"#0d1420",borderRadius:6,padding:10,marginBottom:10}}>
+                    <div style={{fontSize:8,color:"#94a3b8",marginBottom:6}}>Breakdown:</div>
+                    <div style={{fontSize:9,color:"#64748b",lineHeight:1.8}}>
+                      <div>Decoding: <span style={{color:"#ef4444",fontWeight:700}}>{calc.cpuRequirements.breakdown.decoding}</span> cores</div>
+                      <div>Preprocessing: <span style={{color:"#ef4444",fontWeight:700}}>{calc.cpuRequirements.breakdown.preprocessCpuBased}</span> cores</div>
+                      <div>NMS/Agg: <span style={{color:"#ef4444",fontWeight:700}}>{calc.cpuRequirements.breakdown.nms}</span> cores</div>
+                      <div>System OH: <span style={{color:"#ef4444",fontWeight:700}}>{calc.cpuRequirements.breakdown.systemOverhead}</span> cores</div>
+                    </div>
+                  </div>
+
+                  <div style={{background:"#7f1d1d55",borderRadius:6,padding:10,marginBottom:10}}>
+                    <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>Cores Needed</div>
+                    <div style={{fontFamily:"var(--mono)",fontSize:28,fontWeight:700,color:"#ef4444",lineHeight:1}}>
+                      {calc.cpuRequirements.cpuBased.recommended}
+                    </div>
+                    <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>
+                      Minimum: {calc.cpuRequirements.cpuBased.minimum} (1.5× headroom)
+                    </div>
+                  </div>
+
+                  <div style={{fontSize:9,color:"#ef4444",background:"#ef444410",border:"1px solid #ef444433",borderRadius:4,padding:8}}>
+                    <strong>⚠️ NOT RECOMMENDED</strong> for {cameras} cameras. All preprocessing overhead on CPU causes bottlenecks.
+                  </div>
+                </div>
+
+                {/* GPU-ACCELERATED PREPROCESSING */}
+                <div style={{background:"linear-gradient(135deg, #00d4aa15, #00d4aa05)",border:"2px solid #00d4aa44",borderRadius:10,padding:"16px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12}}>
+                    <span style={{fontSize:20}}>✅</span>
+                    <div>
+                      <div style={{fontSize:9,color:"#00d4aa",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>GPU-Accelerated</div>
+                      <div style={{fontSize:8,color:"#64748b"}}>Preprocessing via CUDA</div>
+                    </div>
+                  </div>
+
+                  <div style={{background:"#0d1420",borderRadius:6,padding:10,marginBottom:10}}>
+                    <div style={{fontSize:8,color:"#94a3b8",marginBottom:6}}>Breakdown:</div>
+                    <div style={{fontSize:9,color:"#64748b",lineHeight:1.8}}>
+                      <div>Decoding: <span style={{color:"#00d4aa",fontWeight:700}}>{calc.cpuRequirements.breakdown.decoding}</span> cores</div>
+                      <div>Preprocessing: <span style={{color:"#00d4aa",fontWeight:700}}>{calc.cpuRequirements.breakdown.preprocessGpuAccel}</span> cores</div>
+                      <div>NMS/Agg: <span style={{color:"#00d4aa",fontWeight:700}}>{calc.cpuRequirements.breakdown.nms}</span> cores</div>
+                      <div>System OH: <span style={{color:"#00d4aa",fontWeight:700}}>{calc.cpuRequirements.breakdown.systemOverhead}</span> cores</div>
+                    </div>
+                  </div>
+
+                  <div style={{background:"#10b98155",borderRadius:6,padding:10,marginBottom:10}}>
+                    <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>Cores Needed</div>
+                    <div style={{fontFamily:"var(--mono)",fontSize:28,fontWeight:700,color:"#00d4aa",lineHeight:1}}>
+                      {calc.cpuRequirements.gpuAccelerated.recommended}
+                    </div>
+                    <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>
+                      Minimum: {calc.cpuRequirements.gpuAccelerated.minimum} (1.5× headroom)
+                    </div>
+                  </div>
+
+                  <div style={{fontSize:9,color:"#00d4aa",background:"#00d4aa10",border:"1px solid #00d4aa33",borderRadius:4,padding:8}}>
+                    <strong>✅ RECOMMENDED</strong> for factory deployment. Minimal CPU overhead with GPU acceleration.
+                  </div>
+                </div>
+              </div>
+
+              {showFormulas && (
+                <div className="formula-section">
+                  <div className="formula-section-title">⟨/⟩ CPU Requirement Formulas</div>
+                  <div className="formula-grid">
+                    <FormulaBox label="Video Decoding" formula={`(${cameras} cams × ${calc.cpuRequirements.bitratePerCam} Mbps) / 600 Mbps per core`} result={`${calc.cpuRequirements.breakdown.decoding} cores`} />
+                    <FormulaBox label="Preprocessing (CPU-based)" formula={`${calc.cpuRequirements.totalFpsLoad} fps × 0.0004 cores/fps`} result={`${calc.cpuRequirements.breakdown.preprocessCpuBased} cores`} />
+                    <FormulaBox label="Preprocessing (GPU-accel)" formula={`${calc.cpuRequirements.totalFpsLoad} fps × 0.00008 cores/fps`} result={`${calc.cpuRequirements.breakdown.preprocessGpuAccel} core${calc.cpuRequirements.breakdown.preprocessGpuAccel !== 1 ? 's' : ''}`} />
+                    <FormulaBox label="NMS + System Overhead" formula={`${calc.cpuRequirements.breakdown.nms} + ${calc.cpuRequirements.breakdown.systemOverhead}`} result={`${calc.cpuRequirements.breakdown.nms + calc.cpuRequirements.breakdown.systemOverhead} cores`} />
+                    <FormulaBox label="CPU-Based Total" formula={`Σ breakdowns = ${calc.cpuRequirements.cpuBased.minimum}`} result={`× 1.5 = ${calc.cpuRequirements.cpuBased.recommended} cores (recommended)`} />
+                    <FormulaBox label="GPU-Accel Total" formula={`Σ breakdowns = ${calc.cpuRequirements.gpuAccelerated.minimum}`} result={`× 1.5 = ${calc.cpuRequirements.gpuAccelerated.recommended} cores (recommended)`} />
+                  </div>
+                </div>
+              )}
+
+              <div style={{background:"linear-gradient(135deg, #06b6d415, #06b6d405)",border:"1px solid #06b6d644",borderRadius:8,padding:14,marginBottom:20}}>
+                <div style={{fontSize:9,color:"#06b6d4",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>💡 Recommendation</div>
+                <div style={{fontSize:9,color:"#94a3b8",lineHeight:1.6}}>
+                  For your configuration ({cameras} cameras @ {calc.cpuRequirements.totalFpsLoad.toLocaleString()} fps):
+                  <br/>
+                  <strong style={{color:"#06b6d4"}}>Use {calc.cpuRequirements.gpuAccelerated.recommended}-core CPU with GPU-accelerated preprocessing.</strong>
+                  <br/>
+                  This leaves {(calc.cpuRequirements.gpuAccelerated.recommended - calc.cpuRequirements.gpuAccelerated.minimum)}–{(calc.cpuRequirements.gpuAccelerated.recommended - calc.cpuRequirements.gpuAccelerated.minimum - 2)} cores headroom for peak loads and system activities.
+                  <br/>
+                  <span style={{color:"#64748b",display:"block",marginTop:6}}>Popular choice: AMD EPYC 7302P (32-core, ~$4,500) or Intel Xeon Platinum (32-40 core range)</span>
+                </div>
+              </div>
+              <div className="divider" />
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                <span style={{marginRight:6}}>⚙️ CPU Cores Selection & Server Cost</span>
+              </div>
+
+              {/* CPU CORES COMPARISON & COST */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20}}>
+                {/* RECOMMENDED */}
+                <div style={{background:"linear-gradient(135deg, #f59e0b15, #f59e0b05)",border:"2px solid #f59e0b44",borderRadius:10,padding:"16px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12}}>
+                    <span style={{fontSize:20}}>📊</span>
+                    <div>
+                      <div style={{fontSize:9,color:"#f59e0b",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Recommended</div>
+                      <div style={{fontSize:8,color:"#64748b"}}>Best Practice</div>
+                    </div>
+                  </div>
+
+                  <div style={{background:"#0d1420",borderRadius:6,padding:10,marginBottom:10}}>
+                    <div style={{fontSize:14,fontFamily:"var(--mono)",fontWeight:700,color:"#f59e0b",marginBottom:6}}>
+                      {calc.cpuRequirements.gpuAccelerated.recommended} cores
+                    </div>
+                    <div style={{fontSize:9,color:"#94a3b8",lineHeight:1.6}}>
+                      For {cameras} cameras @ {calc.cpuRequirements.totalFpsLoad.toLocaleString()} fps with GPU-acceleration
+                      <br/><span style={{color:"#64748b"}}>Minimum needed: {calc.cpuRequirements.gpuAccelerated.minimum} | Headroom: {calc.cpuRequirements.gpuAccelerated.recommended - calc.cpuRequirements.gpuAccelerated.minimum} cores</span>
+                    </div>
+                  </div>
+
+                  <div style={{background:"#a16207aa",borderRadius:6,padding:10,marginBottom:8}}>
+                    <div style={{fontSize:9,color:"#64748b"}}>Server Config</div>
+                    <div style={{fontSize:10,fontWeight:700,color:"#fbbf24",marginTop:2}}>
+                      {(() => {
+                        const rec = getUnifiedServerRecommendations(calc.cpuRequirements.gpuAccelerated.recommended, cpuCores, calc.gpusWithRedundancy, gpusPerServer);
+                        return `${rec.totalServersNeeded} servers · ${rec.cpuServersNeeded} CPU / ${rec.gpuServersNeeded} GPU driven`;
+                      })()}
+                    </div>
+                  </div>
+
+                  <div style={{fontSize:8,color:"#f59e0b",background:"#f59e0b10",border:"1px solid #f59e0b33",borderRadius:4,padding:6}}>
+                    Use case-optimized configuration
+                  </div>
+                </div>
+
+                {/* SELECTED */}
+                <div style={{background:"linear-gradient(135deg, #06b6d415, #06b6d405)",border:`2px solid ${cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#06b6d444" : "#ef444444"}`,borderRadius:10,padding:"16px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12}}>
+                    <span style={{fontSize:20}}>🎛️</span>
+                    <div>
+                      <div style={{fontSize:9,color:cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#06b6d4" : "#ef4444",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Your Selection</div>
+                      <div style={{fontSize:8,color:"#64748b"}}>Unified Configuration</div>
+                    </div>
+                  </div>
+
+                  <div style={{background:"#0d1420",borderRadius:6,padding:10,marginBottom:10}}>
+                    <div style={{fontSize:14,fontFamily:"var(--mono)",fontWeight:700,color:cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#06b6d4" : "#ef4444",marginBottom:6}}>
+                      {cpuCores} cores
+                    </div>
+                    <div style={{fontSize:9,color:"#94a3b8",lineHeight:1.6}}>
+                      {cpuCores === calc.cpuRequirements.gpuAccelerated.recommended ? "✅ Matches recommendation perfectly" : cpuCores > calc.cpuRequirements.gpuAccelerated.recommended ? `✅ ${cpuCores - calc.cpuRequirements.gpuAccelerated.recommended} cores above recommended` : `⚠️ ${calc.cpuRequirements.gpuAccelerated.recommended - cpuCores} cores below recommended`}
+                      <br/><span style={{color:"#64748b"}}>Headroom: {cpuCores - calc.cpuRequirements.gpuAccelerated.minimum} cores</span>
+                    </div>
+                  </div>
+
+                  <div style={{background:cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#1e3a8a55" : "#7f1d1d55",borderRadius:6,padding:10,marginBottom:8}}>
+                    <div style={{fontSize:9,color:"#64748b"}}>Server Config</div>
+                    <div style={{fontSize:10,fontWeight:700,color:cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#60a5fa" : "#fca5a5",marginTop:2}}>
+                      {calc.unifiedServerRec.totalServersNeeded} × {calc.unifiedServerRec.coresPerServer}-core server
+                    </div>
+                  </div>
+
+                  <div style={{fontSize:8,color:cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#06b6d4" : "#ef4444",background:cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#06b6d410" : "#ef444410",border:`1px solid ${cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "#06b6d433" : "#ef444433"}`,borderRadius:4,padding:6}}>
+                    {cpuCores >= calc.cpuRequirements.gpuAccelerated.recommended ? "✅ Safe for production" : "⚠️ May experience bottlenecks"}
+                  </div>
+                </div>
+              </div>
+
+              {/* SERVER COST BREAKDOWN */}
+              <div style={{background:"linear-gradient(135deg, #06b6d415, #06b6d405)",border:"1px solid #06b6d644",borderRadius:8,padding:14,marginBottom:20}}>
+                <div style={{fontSize:10,fontWeight:700,color:"#06b6d4",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>💰 Unified Server Cost Analysis</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Servers Needed</div>
+                    <div style={{fontSize:18,fontWeight:700,color:"#06b6d4",marginTop:2}}>{calc.unifiedServerRec.totalServersNeeded}</div>
+                    <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>{calc.unifiedServerRec.totalCoreCoverage} cores + {calc.unifiedServerRec.totalGpuSlots} GPU slots</div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Per Server</div>
+                    <div style={{fontSize:11,fontWeight:700,color:"#06b6d4",marginTop:2,fontFamily:"var(--mono)"}}>
+                      {fmtLacs(serverPriceLow)} – {fmtLacs(serverPriceHigh)}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:"#64748b"}}>Total Cost</div>
+                    <div style={{fontSize:11,fontWeight:700,color:"#06b6d4",marginTop:2,fontFamily:"var(--mono)"}}>
+                      {fmtLacs(calc.unifiedServerCostLow)} – {fmtLacs(calc.unifiedServerCostHigh)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="divider" />
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                🖥️ Unified Server Configuration
+              </div>
+
+              {/* Single unified server card */}
+              <div style={{background:"linear-gradient(135deg,#3b82f615,#3b82f605)",border:"2px solid #3b82f644",borderRadius:10,padding:"16px",marginBottom:20}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                  <span style={{fontSize:22}}>✅</span>
+                  <div>
+                    <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>Unified Servers (CPU + GPU)</div>
+                    <div style={{fontSize:8,color:"#64748b"}}>Each server handles both video decode/preprocess (CPU) and AI inference (GPU)</div>
+                  </div>
+                </div>
+
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
+                  <div style={{background:"#0d1420",borderRadius:6,padding:10}}>
+                    <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>Servers Needed</div>
+                    <div style={{fontFamily:"var(--mono)",fontSize:26,fontWeight:700,color:"#3b82f6",lineHeight:1}}>{calc.unifiedServerRec.totalServersNeeded}</div>
+                    <div style={{fontSize:8,color:"#94a3b8",marginTop:4}}>
+                      max(CPU:{calc.unifiedServerRec.cpuServersNeeded}, GPU:{calc.unifiedServerRec.gpuServersNeeded}) servers
+                    </div>
+                  </div>
+                  <div style={{background:"#0d1420",borderRadius:6,padding:10}}>
+                    <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>GPUs / Server</div>
+                    <div style={{fontFamily:"var(--mono)",fontSize:26,fontWeight:700,color:"#00d4aa",lineHeight:1}}>{calc.unifiedServerRec.gpusPerServer}</div>
+                    <div style={{fontSize:8,color:"#94a3b8",marginTop:4}}>
+                      {calc.gpusWithRedundancy} total ÷ {calc.unifiedServerRec.totalServersNeeded} servers
+                    </div>
+                  </div>
+                  <div style={{background:"#0d1420",borderRadius:6,padding:10}}>
+                    <div style={{fontSize:9,color:"#64748b",marginBottom:4}}>Bottleneck</div>
+                    <div style={{fontFamily:"var(--mono)",fontSize:18,fontWeight:700,color:calc.unifiedServerRec.bottleneck==="CPU"?"#f59e0b":calc.unifiedServerRec.bottleneck==="GPU"?"#ef4444":"#00d4aa",lineHeight:1,marginTop:4}}>{calc.unifiedServerRec.bottleneck}</div>
+                    <div style={{fontSize:8,color:"#94a3b8",marginTop:4}}>limiting factor</div>
+                  </div>
+                </div>
+
+                <div style={{background:"#0d1420",borderRadius:6,padding:10,marginBottom:10}}>
+                  <div style={{fontSize:9,color:"#94a3b8",marginBottom:6,fontWeight:700}}>{calc.unifiedServerRec.coresPerServer}-core server · {calc.unifiedServerRec.gpusPerServer} GPUs/server</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:9,color:"#64748b",lineHeight:1.8}}>
+                    <div>
+                      • CPU cores/server: <span style={{color:"#f1f5f9",fontWeight:700}}>{calc.unifiedServerRec.coresPerServer}</span><br/>
+                      • Total cores: <span style={{color:"#f1f5f9",fontWeight:700}}>{calc.unifiedServerRec.totalCoreCoverage}</span> ({calc.unifiedServerRec.cpuHeadroom} headroom)<br/>
+                      • CPU utilization: <span style={{color:"#f59e0b",fontWeight:700}}>{calc.unifiedServerRec.cpuUtilization}%</span>
+                    </div>
+                    <div>
+                      • GPU slots/server: <span style={{color:"#f1f5f9",fontWeight:700}}>{calc.unifiedServerRec.gpusPerServer}</span><br/>
+                      • Total GPU slots: <span style={{color:"#f1f5f9",fontWeight:700}}>{calc.unifiedServerRec.totalGpuSlots}</span><br/>
+                      • GPU utilization: <span style={{color:"#00d4aa",fontWeight:700}}>{calc.unifiedServerRec.gpuUtilization}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{fontSize:9,color:"#3b82f6",background:"#3b82f610",border:"1px solid #3b82f633",borderRadius:4,padding:8}}>
+                  <strong>Formula:</strong> servers = max(⌈{calc.unifiedServerRec.totalCoresRequired} total cores ÷ {calc.unifiedServerRec.coresPerServer} cores/server⌉, ⌈{calc.gpusWithRedundancy} GPUs ÷ {calc.unifiedServerRec.gpusPerServer} GPUs/server⌉) = max({calc.unifiedServerRec.cpuServersNeeded}, {calc.unifiedServerRec.gpuServersNeeded}) = <strong>{calc.unifiedServerRec.totalServersNeeded}</strong>
+                </div>
               </div>
             </>)}
 
@@ -1137,7 +1896,7 @@ export default function AIInfraCalculator() {
                     <div className="chart-title">On-Premise CAPEX — Low / High</div>
                     {[
                       {label:`⚡ GPU Hardware (${calc.gpusWithRedundancy} units)`, lo:calc.gpuCostLow,    hi:calc.gpuCostHigh,    color:"#00d4aa"},
-                      {label:`🖥 Servers (${calc.serversNeeded} units)`,           lo:calc.serverCostLow, hi:calc.serverCostHigh, color:"#3b82f6"},
+                      {label:`🖥 Unified Servers (${calc.unifiedServerRec.totalServersNeeded} units)`, lo:calc.unifiedServerCostLow, hi:calc.unifiedServerCostHigh, color:"#3b82f6"},
                       {label:`💾 Storage (${calc.pbWithRedundancy.toFixed(3)} PB)`,lo:calc.storageCostLow,hi:calc.storageCostHigh,color:"#f59e0b"},
                     ].map((row,i)=>(
                       <div key={i} className="cost-row">
@@ -1205,7 +1964,7 @@ export default function AIInfraCalculator() {
                   <div className="formula-section-title">⟨/⟩ Cost Range Formulas</div>
                   <div className="formula-grid">
                     <FormulaBox label="GPU Hardware Range" formula={`${calc.gpusWithRedundancy} GPUs × ($${gpuPriceLow.toLocaleString()} – $${gpuPriceHigh.toLocaleString()})`} result={`${fmtLacs(calc.gpuCostLow)} – ${fmtLacs(calc.gpuCostHigh)}`} />
-                    <FormulaBox label="Server Range" formula={`${calc.serversNeeded} servers × ($${serverPriceLow.toLocaleString()} – $${serverPriceHigh.toLocaleString()})`} result={`${fmtLacs(calc.serverCostLow)} – ${fmtLacs(calc.serverCostHigh)}`} />
+                    <FormulaBox label="Server Range" formula={`${calc.unifiedServerRec.totalServersNeeded} servers × ($${serverPriceLow.toLocaleString()} – $${serverPriceHigh.toLocaleString()})`} result={`${fmtLacs(calc.unifiedServerCostLow)} – ${fmtLacs(calc.unifiedServerCostHigh)}`} />
                     <FormulaBox label="Storage Range" formula={`${calc.pbWithRedundancy.toFixed(3)} PB × ($${storagePriceLow.toLocaleString()} – $${storagePriceHigh.toLocaleString()})`} result={`${fmtLacs(calc.storageCostLow)} – ${fmtLacs(calc.storageCostHigh)}`} />
                     {isCloud && <FormulaBox label="Cloud Monthly Range" formula={`${calc.gpusWithRedundancy} GPUs × 720h × ($${cloudPriceLow} – $${cloudPriceHigh})`} result={`${fmtLacs(calc.cloudMonthlyLow)} – ${fmtLacs(calc.cloudMonthlyHigh)}/mo`} />}
                   </div>
@@ -1345,7 +2104,7 @@ export default function AIInfraCalculator() {
                 <div style={{fontSize:10,color:"#64748b",marginTop:4}}>
                   = ceil({calc.effectiveTotalCams} max_cams / {calc.camerasPerGpu} cams_per_gpu)
                   · Total demand: {calc.totalIpsDemandPerCamera.toFixed(1)} IPS/cam · GPU IPS: {calc.gpuIps}
-                  · {calc.serversNeeded} servers @ {gpusPerServer} GPUs each
+                  · {calc.unifiedServerRec.totalServersNeeded} servers @ {calc.unifiedServerRec.gpusPerServer} GPUs each
                 </div>
               </div>
 
@@ -1439,6 +2198,334 @@ export default function AIInfraCalculator() {
                     <div style={{fontSize:9,color:"#64748b",lineHeight:1.5}}>{item.desc}</div>
                   </div>
                 ))}
+              </div>
+            </>)}
+
+            {/* ══════ TIMELINE ══════ */}
+            {activeTab==="timeline" && (<>
+              <div className="alert alert-ok" style={{marginBottom:16}}>
+                <span className="alert-icon">📅</span>
+                <span>Comprehensive deployment timeline with detailed phase breakdown, team resources, risks, and contingencies for full factory AI deployment.</span>
+              </div>
+
+              {/* Overall timeline summary - COMPRESSED, 3-6 MONTHS */}
+              <div style={{background:"linear-gradient(135deg, #06b6d415, #06b6d405)",border:"2px solid #06b6d444",borderRadius:10,padding:"18px",marginBottom:20}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"start"}}>
+                  <div>
+                    <div style={{fontSize:10,fontWeight:700,color:"#06b6d4",textTransform:"uppercase",letterSpacing:1}}>Total Deployment Timeline (3-6 Months)</div>
+                    <div style={{fontFamily:"var(--mono)",fontSize:32,fontWeight:700,color:"#f1f5f9",marginTop:6,marginBottom:3}}>
+                      {calc.deploymentTimeline.total.toFixed(1)} weeks
+                    </div>
+                    <div style={{fontSize:10,color:"#64748b"}}>
+                      ≈ {calc.deploymentTimeline.totalDays} days ({calc.deploymentTimeline.totalMonths} months)
+                    </div>
+                  </div>
+                  <div style={{background:"#06b6d610",border:"1px solid #06b6d633",borderRadius:8,padding:"10px 14px",textAlign:"right"}}>
+                    <div style={{fontSize:8,color:"#94a3b8",marginBottom:6}}>With 20% Contingency</div>
+                    <div style={{fontFamily:"var(--mono)",fontSize:18,fontWeight:700,color:"#60a5fa"}}>
+                      {(calc.deploymentTimeline.total * 1.2).toFixed(1)} wks
+                    </div>
+                    <div style={{fontSize:8,color:"#64748b"}}>({Math.round(calc.deploymentTimeline.totalDays * 1.2)} days)</div>
+                  </div>
+                </div>
+                <div style={{fontSize:9,color:"#94a3b8",lineHeight:1.6,marginTop:12,paddingTop:12,borderTop:"1px solid #06b6d633"}}>
+                  <strong>{calc.activeUcs.length} use case{calc.activeUcs.length !== 1 ? 's' : ''}</strong> across <strong>{calc.deploymentTimeline.activeHeaderCount} header{calc.deploymentTimeline.activeHeaderCount !== 1 ? 's' : ''}</strong> • <strong>{calc.deploymentTimeline.totalCameras} cameras</strong>
+                  <br/>
+                  <strong>Infrastructure:</strong> <span style={{color:"#94a3b8"}}>PRE-PHASE (assumed complete)</span>
+                  <br/>
+                  <strong>Critical path:</strong> Model Prep → Camera Staging (parallel) → Parallel Deployment ({calc.deploymentTimeline.activeHeaderCount} headers) → Testing → Go-Live
+                </div>
+              </div>
+
+              {/* Phase sequence diagram - COMPRESSED */}
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                Compressed Phase Timeline (Infrastructure Pre-Phase)
+              </div>
+              <div style={{background:"var(--panel)",border:"1px solid var(--border)",borderRadius:9,padding:"16px",marginBottom:20}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:9,color:"#94a3b8"}}>
+                  <span style={{color:"#ef4444",fontWeight:700}}>📦 PRE</span> Infrastructure Setup (assumed complete - skip to deployment)
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:9,color:"#94a3b8"}}>
+                  <span style={{color:"#f59e0b",fontWeight:700}}>↓ Week 1</span> Model Prep & Camera Staging (parallel start)
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:9,color:"#94a3b8"}}>
+                  <span style={{color:"#00d4aa",fontWeight:700}}>↓ Week 2-4</span> {calc.deploymentTimeline.activeHeaderCount} Headers Deploy in Parallel (models + cameras)
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:9,color:"#94a3b8"}}>
+                  <span style={{color:"#8b5cf6",fontWeight:700}}>↓ Week 4-5</span> Integration Testing & Cross-Header Validation
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:9,color:"#94a3b8"}}>
+                  <span style={{color:"#06b6d4",fontWeight:700}}>↓ Week 5</span> System Validation & Stress Testing
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,fontSize:9,color:"#94a3b8"}}>
+                  <span style={{color:"#ec4899",fontWeight:700}}>↓ Week 5-6</span> Go-Live & Phased Rollout
+                </div>
+              </div>
+
+              {/* Detailed phases breakdown - HEADER BASED */}
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                Deployment by Functions
+              </div>
+              
+              {/* Header cards - each deployed in parallel weeks 2-4 */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12,marginBottom:20}}>
+                {calc.deploymentTimeline.headerBreakdowns && calc.deploymentTimeline.headerBreakdowns.map((header, idx) => {
+                  const activeUcsInHeader = ALL_USE_CASES.filter(uc => uc.model === header.id && calc.activeUcs.includes(uc));
+                  return (
+                    <div key={header.id} style={{background:"var(--panel)",border:`1px solid ${header.color}44`,borderLeft:`4px solid ${header.color}`,borderRadius:9,padding:"14px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:10}}>
+                        <div>
+                          <div style={{fontSize:10,fontWeight:700,color:header.color}}>📦 {header.name}</div>
+                          <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>
+                            {header.usecaseCount} use case{header.usecaseCount > 1 ? 's' : ''} • {header.cameras} cameras
+                          </div>
+                        </div>
+                        <div style={{fontFamily:"var(--mono)",fontSize:11,fontWeight:700,color:header.color,textAlign:"right"}}>
+                          Week 2-4<br/>
+                          <span style={{fontSize:8,color:"#94a3b8",fontWeight:400}}>parallel</span>
+                        </div>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:8,color:"#94a3b8",background:`${header.color}10`,border:`1px solid ${header.color}22`,borderRadius:6,padding:"8px"}}>
+                        <div>
+                          <strong style={{color:header.color}}>Model Prep</strong><br/>
+                          {DEPLOYMENT_PHASES.modelPrep.toFixed(1)} wks
+                        </div>
+                        <div>
+                          <strong style={{color:header.color}}>Deploy</strong><br/>
+                          {DEPLOYMENT_PHASES.parallelDeploymentPerHeader.toFixed(1)} wks
+                        </div>
+                      </div>
+                      <div style={{fontSize:8,color:"#94a3b8",marginTop:8,lineHeight:1.6}}>
+                        <div style={{marginBottom:4}}><strong>UCs:</strong> {header.usecaseIds.map(id => `#${id}`).join(", ")}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Compressed deployment phases - brief */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr",gap:12,marginBottom:20}}>
+                {/* MODEL PREP */}
+                <div style={{background:"var(--panel)",border:"1px solid #f5a62344",borderLeft:"4px solid #f59e0b",borderRadius:9,padding:"16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:10,fontWeight:700,color:"#fcd34d"}}>🚀 Week 1: Model Prep & Camera Staging (Parallel Start)</div>
+                      <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>Foundations: {DEPLOYMENT_PHASES.modelPrep.toFixed(1)} wk model, {DEPLOYMENT_PHASES.cameraStagingInfra.toFixed(1)} wk staging</div>
+                    </div>
+                  </div>
+                  <div style={{background:"#f5a62315",border:"1px solid #f5a62333",borderRadius:6,padding:"10px",fontSize:8,color:"#94a3b8",lineHeight:1.8}}>
+                    <strong style={{color:"#fcd34d"}}>• Model Prep:</strong> CUDA/cuDNN/TensorRT setup, download base models, DeepStream config<br/>
+                    <strong style={{color:"#fcd34d"}}>• Camera Staging:</strong> Cable runs, PoE infrastructure, network discovery, VLAN setup - teams work in parallel by area
+                  </div>
+                </div>
+
+                {/* DEPLOYMENT */}
+                <div style={{background:"var(--panel)",border:"1px solid #00d4aa44",borderLeft:"4px solid #00d4aa",borderRadius:9,padding:"16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:10,fontWeight:700,color:"#6ee7b7"}}>⚡ Week 2-4: Parallel Deployment ({calc.deploymentTimeline.activeHeaderCount} Headers)</div>
+                      <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>Each header deploys models + integrates cameras simultaneously (~{DEPLOYMENT_PHASES.parallelDeploymentPerHeader.toFixed(1)} weeks all complete within this window)</div>
+                    </div>
+                  </div>
+                  <div style={{background:"#00d4aa15",border:"1px solid #00d4aa33",borderRadius:6,padding:"10px",fontSize:8,color:"#94a3b8",lineHeight:1.8}}>
+                    <strong style={{color:"#6ee7b7"}}>Per-Header Work (independent teams):</strong><br/>
+                    • Model tuning (confidence thresholds, filtering, post-processing)<br/>
+                    • Camera calibration (focus, exposure, resolution per location)<br/>
+                    • Integration testing (model on live feeds from this header)<br/>
+                    ✓ <strong>All {calc.deploymentTimeline.activeHeaderCount} headers complete deployment within same 2-week window</strong>
+                  </div>
+                </div>
+
+                {/* TESTING */}
+                <div style={{background:"var(--panel)",border:"1px solid #8b5cf644",borderLeft:"4px solid #8b5cf6",borderRadius:9,padding:"16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:10,fontWeight:700,color:"#d8b4fe"}}>🧪 Week 4-5: Integration Testing ({DEPLOYMENT_PHASES.integrationTesting.toFixed(1)} wk)</div>
+                      <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>Cross-header validation and system integration</div>
+                    </div>
+                  </div>
+                  <div style={{background:"#8b5cf610",border:"1px solid #8b5cf622",borderRadius:6,padding:"10px",fontSize:8,color:"#94a3b8",lineHeight:1.8}}>
+                    • Multi-header false-positive reduction (coordinated model tuning)<br/>
+                    • Cross-header scene understanding (headers don't conflict)<br/>
+                    • Accuracy baseline measurement (per-UC metrics)<br/>
+                    • Performance optimization (tune batch sizes, throughput)
+                  </div>
+                </div>
+
+                {/* VALIDATION + GO-LIVE */}
+                <div style={{background:"var(--panel)",border:"1px solid #06b6d444",borderLeft:"4px solid #06b6d4",borderRadius:9,padding:"16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:10,fontWeight:700,color:"#67e8f9"}}>✅ Week 5-6: System Validation & Go-Live ({(DEPLOYMENT_PHASES.systemValidation + DEPLOYMENT_PHASES.goLive).toFixed(1)} wk)</div>
+                      <div style={{fontSize:8,color:"#94a3b8",marginTop:2}}>Full-system test then phased production rollout</div>
+                    </div>
+                  </div>
+                  <div style={{background:"#06b6d410",border:"1px solid #06b6d622",borderRadius:6,padding:"10px",fontSize:8,color:"#94a3b8",lineHeight:1.8}}>
+                    <strong style={{color:"#67e8f9"}}>System Validation:</strong> All {calc.deploymentTimeline.totalCameras} cameras + models running, stress test (peak load), edge cases<br/>
+                    <strong style={{color:"#67e8f9"}}>Go-Live:</strong> Phased rollout (10% → 50% → 100%), monitoring dashboard active, ops team trained, on-call support ready
+                  </div>
+                </div>
+              </div>
+
+              {/* Old phase cards removed - using compressed header-based timeline instead */}
+              {/* Timeline UI cleanly updated to show 3-6 month deployment by functional headers */}
+
+              {/* Critical bottlenecks */}
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                ⚡ Critical Bottlenecks & Mitigation
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
+                <div style={{background:"#f5a62310",border:"1px solid #f5a62333",borderRadius:8,padding:"10px"}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔴 GPU Supply Chain Delay</div>
+                  <div style={{fontSize:8.5,color:"#94a3b8",lineHeight:1.6}}>
+                    <strong>Impact:</strong> +1-2 weeks delay<br/>
+                    <strong>Mitigation:</strong> Order 4-8 weeks before deployment, have backup GPU SKUs pre-approved, negotiate expedited shipping
+                  </div>
+                </div>
+                <div style={{background:"#f5a62310",border:"1px solid #f5a62333",borderRadius:8,padding:"10px"}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔴 Model Accuracy Issues</div>
+                  <div style={{fontSize:8.5,color:"#94a3b8",lineHeight:1.6}}>
+                    <strong>Impact:</strong> +1-3 weeks rework<br/>
+                    <strong>Mitigation:</strong> Collect training data early, start model tuning in parallel, have diversity in lighting/angles
+                  </div>
+                </div>
+                <div style={{background:"#f5a62310",border:"1px solid #f5a62333",borderRadius:8,padding:"10px"}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔴 Site Access Constraints</div>
+                  <div style={{fontSize:8.5,color:"#94a3b8",lineHeight:1.6}}>
+                    <strong>Impact:</strong> +0.5-1 week delays<br/>
+                    <strong>Mitigation:</strong> Coordinate with facilities early, get access schedules, pre-plan cable routes
+                  </div>
+                </div>
+                <div style={{background:"#f5a62310",border:"1px solid #f5a62333",borderRadius:8,padding:"10px"}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔴 Network Congestion</div>
+                  <div style={{fontSize:8.5,color:"#94a3b8",lineHeight:1.6}}>
+                    <strong>Impact:</strong> +0.5-1 week discovery phase<br/>
+                    <strong>Mitigation:</strong> Run bandwidth audit upfront, upgrade switches/NICs before deployment
+                  </div>
+                </div>
+              </div>
+
+              {/* Per-use-case model deployment time (NOT including shared camera integration) */}
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                📊 Per-Use-Case Deployment Time (Model Only, Camera Integration Shared)
+              </div>
+              <div style={{background:"#06b6d410",border:"1px solid #06b6d633",borderRadius:9,padding:"12px",marginBottom:12}}>
+                <div style={{fontSize:8.5,color:"#94a3b8",lineHeight:1.6}}>
+                  <strong style={{color:"#00d4aa"}}>⚠️ Important:</strong> Camera integration (320 cameras) is handled once during Week 1-2 (Camera Staging phase), not per-UC. 
+                  Each UC below shows only its <strong>model deployment</strong> time (within the parallel deployment window weeks 2-4).
+                </div>
+              </div>
+
+              {/* Chart: Use Case Deployment Timeline */}
+              {calc.deploymentTimeline.useCaseBreakdown && calc.deploymentTimeline.useCaseBreakdown.length > 0 ? (
+              <div style={{background:"var(--panel)",border:"1px solid var(--border)",borderRadius:9,padding:"16px",marginBottom:20}}>
+                <div style={{fontSize:9,fontWeight:700,color:"#f1f5f9",marginBottom:12}}>Deployment Time per Use Case (Weeks)</div>
+                <ResponsiveContainer width="100%" height={Math.max(300, calc.deploymentTimeline.useCaseBreakdown.length * 25)}>
+                  <BarChart
+                    data={calc.deploymentTimeline.useCaseBreakdown.map(uc => ({
+                      name: `#${uc.n}`,
+                      label: uc.label.substring(0, 35) + (uc.label.length > 35 ? "..." : ""),
+                      weeks: parseFloat(uc.estimatedWeeks.toFixed(1)),
+                      color: uc.headerColor,
+                      fullLabel: uc.label,
+                    }))}
+                    margin={{top:5,right:30,left:250,bottom:5}}
+                    layout="vertical"
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis type="number" stroke="#64748b" fontSize={11} />
+                    <YAxis 
+                      type="category" 
+                      dataKey="label" 
+                      stroke="#64748b" 
+                      fontSize={9}
+                      width={240}
+                    />
+                    <Tooltip
+                      contentStyle={{background:"#1e293b",border:"1px solid #475569",borderRadius:6,fontSize:11}}
+                      formatter={(value) => [`${value} weeks`, "Deployment Time"]}
+                      labelFormatter={(label) => `UC ${label}`}
+                    />
+                    <Bar dataKey="weeks" fill="#00d4aa" radius={[0, 8, 8, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+                <div style={{fontSize:8,color:"#94a3b8",marginTop:12,lineHeight:1.6}}>
+                  <strong>📌 Note:</strong> Each bar shows model deployment time only. All UCs in same header group (e.g., PPE cases #2,#3,#13) can run in parallel.
+                  Chart helps identify which use cases have longest model complexity requirements.
+                </div>
+              </div>
+              ) : (
+              <div style={{background:"var(--panel)",border:"1px solid var(--border)",borderRadius:9,padding:"16px",marginBottom:20,textAlign:"center"}}>
+                <div style={{fontSize:10,color:"#94a3b8"}}>No use cases selected. Enable at least one use case to see deployment timeline.</div>
+              </div>
+              )}
+
+              {/* Detailed per-UC breakdown list */}
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                📋 Detailed Per-Use-Case Breakdown
+              </div>
+              <div style={{background:"var(--panel)",border:"1px solid var(--border)",borderRadius:9,marginBottom:20,overflow:"hidden"}}>
+                {calc.deploymentTimeline.useCaseBreakdown.map((uc, idx) => (
+                  <div key={idx} style={{borderBottom: idx < calc.deploymentTimeline.useCaseBreakdown.length - 1 ? "1px solid var(--border)" : "none",padding:"12px",background:idx%2===0?"transparent":"#ffffff02"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:9,fontWeight:700,color:"#f1f5f9",marginBottom:2}}>#{uc.n} — {uc.label}</div>
+                        <div style={{fontSize:8,color:"#94a3b8"}}>
+                          Header: <strong style={{color:uc.headerColor}}>{uc.header}</strong> •  
+                          Pipeline: <strong style={{color:"#f59e0b"}}>{uc.modelComplexity}</strong> • 
+                          Cameras: <strong style={{color:"#3b82f6"}}>{uc.cameras}</strong>
+                        </div>
+                      </div>
+                      <div style={{fontFamily:"var(--mono)",fontSize:12,fontWeight:700,color:"#00d4aa",textAlign:"right",minWidth:"90px"}}>
+                        {uc.estimatedWeeks.toFixed(1)} wks
+                        <div style={{fontSize:8,color:"#94a3b8",fontWeight:400}}>model only</div>
+                      </div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:8,color:"#94a3b8",marginTop:6}}>
+                      <div style={{background:"#f5a62315",border:"1px solid #f5a62333",borderRadius:4,padding:"8px"}}>
+                        <strong style={{color:"#fcd34d"}}>🤖 Model Deployment</strong><br/>
+                        {uc.estimatedWeeks.toFixed(1)} wks<br/>
+                        <span style={{fontSize:7}}>{uc.modelComplexity}</span>
+                      </div>
+                      <div style={{background:"#06b6d410",border:"1px solid #06b6d622",borderRadius:4,padding:"8px"}}>
+                        <strong style={{color:"#67e8f9"}}>📚 Testing (UC portion)</strong><br/>
+                        ~0.3 wks<br/>
+                        <span style={{fontSize:7}}>(within shared testing phase)</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              
+              {/* Shared camera integration note */}
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                🎥 Shared Camera Infrastructure (Week 1-2)
+              </div>
+              <div style={{background:"#3b82f610",border:"1px solid #3b82f622",borderRadius:9,padding:"14px",marginBottom:20}}>
+                <div style={{fontSize:9,fontWeight:700,color:"#93c5fd",marginBottom:8}}>All 320 Cameras Installed in Parallel</div>
+                <div style={{fontSize:8.5,color:"#94a3b8",lineHeight:1.8}}>
+                  <strong>Timeline:</strong> Week 1-2 (parallel with Model Prep)<br/>
+                  <strong>Tasks:</strong> Cable runs, PoE infrastructure, network discovery, VLAN setup, camera discovery<br/>
+                  <strong>Work Estimate:</strong> 320 cameras × 2.5 hrs/camera = 800 hours ÷ 40 hrs/week ÷ 3-4 tech teams = ~1-2 weeks<br/>
+                  <strong>Cost:</strong> Single infrastructure investment (not per-UC)<br/>
+                  <strong>Impact:</strong> Once complete, all use cases benefit from camera availability simultaneously
+                </div>
+              </div>
+              
+              {/* Timeline sequence summary */}
+              <div style={{fontSize:10,fontWeight:700,color:"var(--accent2)",textTransform:"uppercase",letterSpacing:"0.8px",marginBottom:12}}>
+                ⏱️ Execution Sequence Summary
+              </div>
+              <div style={{background:"var(--panel)",border:"1px solid var(--border)",borderRadius:9,padding:"14px",fontSize:9,color:"#94a3b8",lineHeight:2}}>
+                <div><strong style={{color:"#ef4444"}}>1. Infrastructure (shared, happens first):</strong> {Math.ceil(calc.deploymentTimeline.phases.infrastructure)} weeks setup time</div>
+                <div><strong style={{color:"#f59e0b"}}>2. Model deployment & camera integration (parallel):</strong> Run simultaneously, longest determines phase duration</div>
+                <div style={{paddingLeft:16}}>• Model: {Math.ceil(calc.deploymentTimeline.phases.modelDeployment)} weeks (depends on pipeline complexity)</div>
+                <div style={{paddingLeft:16}}>• Cameras: {Math.ceil(calc.deploymentTimeline.phases.cameraIntegration)} weeks ({calc.deploymentTimeline.useCaseBreakdown.reduce((s,u)=>s+u.cameras,0)} cameras × 2.5 hrs each)</div>
+                <div><strong style={{color:"#8b5cf6"}}>3. Testing & validation:</strong> {Math.ceil(calc.deploymentTimeline.phases.testing)} weeks (after cameras ready)</div>
+                <div><strong style={{color:"#06b6d4"}}>4. Go-live & handover:</strong> {Math.ceil(calc.deploymentTimeline.phases.goLive)} weeks (phased rollout + ops transition)</div>
+                <div style={{marginTop:10,paddingTop:10,borderTop:"1px solid var(--border)",fontStyle:"italic"}}>
+                  <strong>Formula:</strong> Infrastructure + max(Models, Cameras) + Testing + Go-Live = <strong style={{color:"#00d4aa"}}>{calc.deploymentTimeline.total.toFixed(1)} weeks total</strong>
+                </div>
               </div>
             </>)}
 
