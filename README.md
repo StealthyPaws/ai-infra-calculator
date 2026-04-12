@@ -1,6 +1,21 @@
-# ⚡ AI Infrastructure Calculator
+<p align="center">
+  <svg width="72" height="72" viewBox="0 0 24 24" fill="none">
+    <rect x="3" y="3" width="8" height="8" rx="2" fill="#4F46E5"/>
+    <rect x="13" y="3" width="8" height="8" rx="2" fill="#4F46E5" opacity="0.6"/>
+    <rect x="8" y="13" width="8" height="8" rx="2" fill="#4F46E5" opacity="0.8"/>
+  </svg>
 
-> Plan your GPU, compute, storage, and cost requirements **before** you build — not after you've already bought the wrong hardware.
+  <br/>
+
+  <h1>AI Infrastructure Calculator</h1>
+
+  <p>
+    Plan GPU · Compute · Storage · Cost before you build
+  </p>
+</p>
+
+
+> Plan your GPU, compute, storage, and cost requirements **before** you build, not after you've already bought the wrong hardware.
 
 A free, open-source infrastructure sizing tool for anyone building real-time AI systems. Works across industries: computer vision, NLP, audio AI, recommendation engines, LLM inference, and more.
 
@@ -10,13 +25,13 @@ A free, open-source infrastructure sizing tool for anyone building real-time AI 
 
 Most AI infrastructure planning happens in one of two ways:
 
-1. **The optimistic way** — you estimate "a few GPUs should be fine" and discover three weeks post-deployment that your inference pipeline is bottlenecking, your storage is filling up in days instead of months, and your servers are running at 95% CPU.
+1. **The optimistic way**: you estimate "a few GPUs should be fine" and discover three weeks post-deployment that your inference pipeline is bottlenecking, your storage is filling up in days instead of months, and your servers are running at 95% CPU.
 
-2. **The expensive way** — someone pads the estimate with large safety margins, procures too much hardware, and you end up with a room full of underutilized servers on a 3-year lease.
+2. **The expensive way**: someone pads the estimate with large safety margins, procures too much hardware, and you end up with a room full of underutilized servers on a 3-year lease.
 
 This calculator is the middle path: bottoms-up sizing based on actual throughput math, VRAM requirements, network bandwidth, and real cost ranges across on-prem and cloud deployment models.
 
-**The goal isn't to give you a perfect answer — it's to give you a defensible starting point before you commit budget.**
+**The goal isn't to give you a perfect answer: it's to give you a defensible starting point before you commit budget.**
 
 ---
 
@@ -25,7 +40,7 @@ This calculator is the middle path: bottoms-up sizing based on actual throughput
 ### ⚡ Compute (GPU + CPU)
 - GPU count from **IPS (inferences/second) throughput model**, not vague "stream" estimates
 - Resolution-aware: a model at 960×960 costs 2.25× more compute than the same model at 640×640
-- Handles multi-task workloads — all active AI tasks share the same GPU fleet
+- Handles multi-task workloads: all active AI tasks share the same GPU fleet
 - Servers derived from thermal/power constraints per GPU type
 - CPU core recommendation based on video decode bandwidth + preprocessing load
 
@@ -145,18 +160,18 @@ export default function App() {
 - React 18+
 - `recharts` for charts
 - Tailwind or your own CSS (component uses inline styles + CSS variables)
-- Google Fonts (IBM Plex Mono + Syne) — loaded via `@import`
+- Google Fonts (IBM Plex Mono + Syne): loaded via `@import`
 
 ---
 
 ## How to Use
 
-1. **Select your AI task types** — pick all the workloads your system needs to run
-2. **Configure each task** — set resolution, target FPS, and concurrent stream count
-3. **Choose your GPU** — the tool will suggest how many you need
-4. **Set infrastructure inputs** — bitrate per stream, CPU cores, storage retention
-5. **Review Summary tab** — GPU count, server count, VRAM check, network, cost range
-6. **Toggle Cloud/On-Prem** — compare deployment models
+1. **Select your AI task types**: pick all the workloads your system needs to run
+2. **Configure each task**: set resolution, target FPS, and concurrent stream count
+3. **Choose your GPU**: the tool will suggest how many you need
+4. **Set infrastructure inputs**: bitrate per stream, CPU cores, storage retention
+5. **Review Summary tab**: GPU count, server count, VRAM check, network, cost range
+6. **Toggle Cloud/On-Prem**: compare deployment models
 
 ---
 
@@ -198,7 +213,7 @@ const TASK_PRESETS = [
 
 ## License
 
-MIT — use it, fork it, embed it in your proposals.
+MIT: use it, fork it, embed it in your proposals.
 
 ---
 
